@@ -1,10 +1,15 @@
 import promptSync from 'prompt-sync';
+import { jsonProperty, Serializable } from "ts-serializable";
+import fs from "fs";
+import path from 'path';
+import readline from 'node:readline';
+
 class GameLogger {
 
     private static instance: GameLogger | null = null;
 
 
-    private constructor() {}
+    private constructor() { }
 
     public static getInstance(): GameLogger {
         if (GameLogger.instance === null) {
@@ -17,19 +22,19 @@ class GameLogger {
         console.log(`[GAME LOG]: ${message}`);
     }
 
-    
+
 }
 
 const logger = GameLogger.getInstance();
 logger.log("Игра началась!");
 
 const logger2 = GameLogger.getInstance();
-console.log(logger === logger2); 
+console.log(logger === logger2);
 
 
 abstract class Enemy {
 
-    protected name: String;
+    protected name: string;
     protected health: number;
     protected damage: number;
 
@@ -40,12 +45,15 @@ abstract class Enemy {
         this.damage = damage;
     }
 
-    public getName(): String{
+    public getName(): string {
         return this.name;
     }
-    
-    public getHealth(): number{
+
+    public getHealth(): number {
         return this.health;
+    }
+    getDamage(): number {
+        return this.damage;
     }
 
     public abstract takeDamage(damage: number): void;
@@ -56,13 +64,81 @@ abstract class Enemy {
     }
 }
 
+export class BaseEnemyDecorator extends Enemy {
+
+    protected wrapee: Enemy;
+    protected logger: GameLogger;
+
+    constructor(wrapee: Enemy) {
+        super(wrapee.getName(), wrapee.getHealth(), wrapee.getDamage());
+        this.wrapee = wrapee;
+        this.logger = GameLogger.getInstance();
+    }
+
+    public getName(): string {
+        return this.wrapee.getName();
+    }
+
+    public getHealth(): number {
+        return this.wrapee.getHealth();
+    }
+
+    public isAlive(): boolean {
+        return this.wrapee.isAlive();
+    }
+
+    public takeDamage(damage: number): void {
+        this.wrapee.takeDamage(damage);
+    }
+
+    public attack(player: PlayableCharacter): void {
+        this.wrapee.attack(player);
+    }
+}
+
+export class LegendaryEnemyDecorator extends BaseEnemyDecorator {
+    private static readonly ADDITIONAL_DAMAGE = 20;
+
+    constructor(wrapee: Enemy) {
+        super(wrapee);
+    }
+
+    getName(): string {
+        return `Легендарный ${super.getName()}`;
+    }
+
+    attack(player: PlayableCharacter): void {
+        super.attack(player);
+
+        this.logger.log("Враг легендарный и наносит дополнительный урон!!!");
+        player.takeDamage(LegendaryEnemyDecorator.ADDITIONAL_DAMAGE);
+    }
+}
+
+export class WindfuryEnemyDecorator extends BaseEnemyDecorator {
+    constructor(wrapee: Enemy) {
+        super(wrapee);
+    }
+
+    getName(): string {
+        return `Обладающий Неистовством Ветра ${super.getName()}`;
+    }
+
+    attack(player: PlayableCharacter): void {
+        super.attack(player);
+
+        this.logger.log("Неистовство ветра позволяет врагу атаковать второй раз!!!");
+        super.attack(player);
+    }
+}
+
 interface PlayableCharacter {
     getName(): string;
     takeDamage(damage: number): void;
     isAlive(): boolean;
 }
 
-export interface Weapon{
+export interface Weapon {
 
     getDamage(): number;
     use(): void;
@@ -349,6 +425,66 @@ class RogueEquipmentChest implements EquipmentChest {
     }
 }
 
+
+export class WeaponToEnemyAdapter extends Enemy {
+    private static readonly DISPEL_PROBABILITY = 0.2;
+
+    private logger: GameLogger;
+    private weapon: Weapon;
+
+    constructor(weapon: Weapon) {
+        super("Магическое оружие", 50, weapon.getDamage()); // Устанавливаем имя, здоровье и урон из оружия
+        this.logger = GameLogger.getInstance();
+        this.weapon = weapon;
+    }
+
+    takeDamage(damage: number): void {
+        this.logger.log(`${this.name} получает ${damage} урона!`);
+        this.health -= damage;
+
+        const dispelRoll = Math.random(); // Генерация случайного числа от 0 до 1
+        if (dispelRoll <= WeaponToEnemyAdapter.DISPEL_PROBABILITY) {
+            this.logger.log("Атака рассеяла заклятие с оружия!");
+            this.health = 0;
+        }
+
+        if (this.health > 0) {
+            this.logger.log(`У ${this.name} осталось ${this.health} здоровья`);
+        }
+    }
+
+    attack(player: PlayableCharacter): void {
+        this.logger.log(`${this.name} атакует ${player.getName()}!`);
+        player.takeDamage(this.damage);
+    }
+}
+
+export class WeaponEquipmentFacade {
+    private equipmentChest: EquipmentChest;
+
+    constructor(characterClass: CharacterClass) {
+        switch (characterClass) {
+            case CharacterClass.MAGE:
+                this.equipmentChest = new MagicalEquipmentChest();
+                break;
+            case CharacterClass.WARRIOR:
+                this.equipmentChest = new WarriorEquipmentChest();
+                break;
+            case CharacterClass.THIEF:
+                this.equipmentChest = new ThiefEquipmentChest();
+                break;
+            case CharacterClass.ROGUE:
+                this.equipmentChest = new RogueEquipmentChest();
+                break;
+
+        }
+    }
+
+    getWeapon(): Weapon {
+        return this.equipmentChest.getWeapon();
+    }
+}
+
 export interface Location {
 
     spawnEnemy(): Enemy
@@ -425,24 +561,158 @@ export class DragonBarrow implements Location {
 
 }
 
-export class HauntedHouse implements Location {
 
-    public spawnEnemy(): Enemy {
-        return new Dragon();
+export class HauntedManor implements Location {
+
+    private weaponEquipmentFacade: WeaponEquipmentFacade;
+
+    constructor() {
+        const randomIndex = Math.floor(Math.random() * Object.keys(CharacterClass).length / 2); // Получаем случайный индекс для CharacterClass
+        const randomClass = Object(CharacterClass)[randomIndex];
+        this.weaponEquipmentFacade = new WeaponEquipmentFacade(randomClass);
     }
 
+    spawnEnemy(): Enemy {
+        const weapon: Weapon = this.weaponEquipmentFacade.getWeapon();
+        const enchantedWeapon: Enemy = new WeaponToEnemyAdapter(weapon);
+        return enchantedWeapon;
+    }
 }
 
-const prompt = promptSync();
-const gameLogger = GameLogger.getInstance();
+export class PlayerProfile {
+    private name: string;
+    private score: number;
 
-function main() {
+    constructor(name: string, score: number) {
+        this.name = name;
+        this.score = score;
+    }
+
+    public getName(): string {
+        return this.name;
+    }
+
+    public setName(name: string): void {
+        this.name = name;
+    }
+
+    public getScore(): number {
+        return this.score;
+    }
+
+    public setScore(score: number): void {
+        this.score = score;
+    }
+}
+
+export interface PlayerProfileRepository {
+    getProfile(name: string): PlayerProfile | null;
+    updateHighScore(name: string, score: number): void;
+}
+
+export class PlayerProfileDBRepository implements PlayerProfileRepository {
+    private static readonly SCORE_FILENAME: string = path.resolve('score.json');
+
+    constructor() {
+        if (!fs.existsSync(PlayerProfileDBRepository.SCORE_FILENAME)) {
+            fs.writeFileSync(PlayerProfileDBRepository.SCORE_FILENAME, JSON.stringify({}));
+        }
+    }
+
+    public getProfile(name: string): PlayerProfile | null {
+        const playerProfiles = this.findAll();
+        const profileData = playerProfiles[name];
+
+        if (!profileData) {
+            const newProfile = new PlayerProfile(name, 0);
+            playerProfiles[name] = this.toPlainObject(newProfile);
+            this.update(playerProfiles);
+            return newProfile;
+        }
+
+        return this.fromPlainObject(profileData);
+    }
+
+    public updateHighScore(name: string, score: number): void {
+        const playerProfiles = this.findAll();
+
+        if (!playerProfiles[name]) {
+            playerProfiles[name] = this.toPlainObject(new PlayerProfile(name, score));
+        } else {
+            playerProfiles[name].score = score;
+        }
+
+        this.update(playerProfiles);
+    }
+
+    private findAll(): Record<string, { name: string; score: number }> {
+        const data = fs.readFileSync(PlayerProfileDBRepository.SCORE_FILENAME, 'utf-8');
+        return JSON.parse(data);
+    }
+
+    private update(playerProfiles: Record<string, { name: string; score: number }>): void {
+        fs.writeFileSync(PlayerProfileDBRepository.SCORE_FILENAME, JSON.stringify(playerProfiles, null, 4), 'utf-8');
+    }
+
+    private toPlainObject(profile: PlayerProfile): { name: string; score: number } {
+        return { name: profile.getName(), score: profile.getScore() };
+    }
+
+    private fromPlainObject(data: { name: string; score: number }): PlayerProfile {
+        return new PlayerProfile(data.name, data.score);
+    }
+}
+
+
+export class PlayerProfileCacheRepository implements PlayerProfileRepository {
+    private cache: Map<string, PlayerProfile> = new Map();
+    private database: PlayerProfileDBRepository;
+
+    constructor() {
+        this.database = new PlayerProfileDBRepository();
+    }
+
+    public getProfile(name: string): PlayerProfile | null {
+        if (!this.cache.has(name)) {
+            const profile = this.database.getProfile(name);
+            if (profile) this.cache.set(name, profile);
+        }
+        return this.cache.get(name) || null;
+    }
+
+    public updateHighScore(name: string, score: number): void {
+        const profile = this.getProfile(name);
+        if (profile) {
+            profile.setScore(score);
+            this.cache.set(name, profile);
+            this.database.updateHighScore(name, score);
+        }
+    }
+}
+
+// Игровая логика
+const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+});
+
+const askQuestion = (question: string): Promise<string> => {
+    return new Promise((resolve) => rl.question(question, resolve));
+};
+
+const main = async () => {
+    const gameLogger = GameLogger.getInstance();
+    const repository = new PlayerProfileCacheRepository();
+
     console.log("Создайте своего персонажа:");
 
-    const name = prompt("Введите имя: ");
-    const classOptions = Object.keys(CharacterClass);
-    console.log(`Выберите класс из списка: ${classOptions.join(', ')}`);
-    const characterClassInput = prompt("Введите класс: ");
+    const name = await askQuestion("Введите имя: ");
+    let playerProfile = repository.getProfile(name);
+
+    console.log(`Ваш текущий счет: ${playerProfile?.getScore() || 0}`);
+    const classOptions = Object.keys(CharacterClass).join(', ');
+    console.log(`Выберите класс из списка: ${classOptions}`);
+    const characterClassInput = await askQuestion("Введите класс: ");
     const characterClass = CharacterClass[characterClassInput as keyof typeof CharacterClass];
 
     const startingEquipmentChest = getChest(characterClass);
@@ -459,34 +729,40 @@ function main() {
     gameLogger.log(`${player.getName()} очнулся на распутье!`);
 
     console.log("Куда вы двинетесь? Выберите локацию: (мистический лес, логово дракона, проклятый дом)");
-    const locationName = prompt("Введите локацию: ");
+    const locationName = await askQuestion("Введите локацию: ");
     const location = getLocation(locationName);
 
     gameLogger.log(`${player.getName()} отправился в ${locationName}`);
-    const enemy = location.spawnEnemy();
+    let enemy = location.spawnEnemy();
     gameLogger.log(`У ${player.getName()} на пути возникает ${enemy.getName()}, начинается бой!`);
 
     while (player.isAlive() && enemy.isAlive()) {
-        prompt("Введите что-нибудь чтобы атаковать!");
+        await askQuestion("Введите что-нибудь чтобы атаковать!");
         player.attack(enemy);
-        
-        const stunned = Math.random() < 0.5;
-        if (stunned) {
+
+        if (Math.random() < 0.5) {
             gameLogger.log(`${enemy.getName()} был оглушен атакой ${player.getName()}!`);
             continue;
         }
+
         enemy.attack(player);
     }
 
-    console.log();
-
     if (!player.isAlive()) {
         gameLogger.log(`${player.getName()} был убит...`);
+        rl.close();
         return;
     }
 
     gameLogger.log(`Злой ${enemy.getName()} был побежден! ${player.getName()} отправился дальше по тропе судьбы...`);
-}
+
+    // Обновление счета игрока
+    repository.updateHighScore(name, (playerProfile?.getScore() || 0) + 100);
+    playerProfile = repository.getProfile(name);
+    console.log(`Ваш обновленный счет: ${playerProfile?.getScore()}`);
+
+    rl.close();
+};
 
 function getChest(characterClass: CharacterClass): EquipmentChest {
     switch (characterClass) {
@@ -510,10 +786,11 @@ function getLocation(locationName: string): Location {
         case "логово дракона":
             return new DragonBarrow();
         case "проклятый дом":
-            return new HauntedHouse();
+            return new HauntedManor();
         default:
             throw new Error("Неизвестная локация");
     }
 }
 
-main();
+// Запуск игры
+main().catch((err) => console.error(err));
